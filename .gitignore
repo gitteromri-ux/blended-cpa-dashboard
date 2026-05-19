@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# Local data dumps (keep only the committed parquet)
+*.xlsx
+*.xls
+*.csv
+!data/sample.csv

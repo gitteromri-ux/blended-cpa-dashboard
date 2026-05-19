@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blended CPA · Cohort Dashboard</title>
+    <meta
+      name="description"
+      content="Long-term blended CPA analysis by initial-click cohort."
+    />
+
+    <!-- Fonts: Inter for UI, Instrument Serif for display -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- ───────── Loading veil ───────── -->
+    <div id="loader" class="loader" aria-live="polite">
+      <div class="loader-inner">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="loader-text">Loading cohort data…</div>
+        <div id="loader-status" class="loader-status">Initialising engine</div>
+      </div>
+    </div>
+
+    <main class="app" hidden>
+      <!-- ───────── Header ───────── -->
+      <header class="hdr">
+        <div>
+          <div class="hdr-eyebrow">Marketing Analytics</div>
+          <h1 class="hdr-title">
+            <span class="hdr-title-serif">Blended CPA</span> · Cohort Dashboard
+          </h1>
+          <p class="hdr-sub">
+            What the first click is really worth — including downstream leads
+            and acquisitions from every other channel.
+          </p>
+        </div>
+        <div class="hdr-meta">
+          <div>
+            <div class="meta-label">In view</div>
+            <div id="meta-cohorts" class="meta-value">—</div>
+          </div>
+          <div>
+            <div class="meta-label">Total dataset</div>
+            <div id="meta-rows" class="meta-value">—</div>
+          </div>
+          <div>
+            <div class="meta-label">Date range</div>
+            <div id="meta-range" class="meta-value">—</div>
+          </div>
+          <button id="share-link" class="btn-ghost btn-sm" title="Copy a link that reproduces this view">Copy view link</button>
+        </div>
+      </header>
+
+      <!-- ───────── Filters ───────── -->
+      <section class="filters" aria-label="Filters">
+        <div class="filter">
+          <label for="f-initial-media">Initial media</label>
+          <select id="f-initial-media" multiple size="3"></select>
+        </div>
+
+        <div class="filter">
+          <label for="f-campaign">Initial campaign</label>
+          <input
+            id="f-campaign-search"
+            type="search"
+            placeholder="Search campaign ID…"
+            autocomplete="off"
+          />
+          <select id="f-campaign" multiple size="6"></select>
+          <div class="filter-hint">
+            <span id="f-campaign-count">0</span> selected ·
+            <button id="f-campaign-clear" type="button" class="link-btn">
+              clear
+            </button>
+          </div>
+        </div>
+
+        <div class="filter">
+          <label>Initial lead month</label>
+          <div class="row">
+            <input id="f-date-from" type="month" />
+            <span class="dash">→</span>
+            <input id="f-date-to" type="month" />
+          </div>
+          <div class="row presets">
+            <button data-preset="all" type="button">All</button>
+            <button data-preset="ytd" type="button">YTD</button>
+            <button data-preset="12m" type="button">Last 12m</button>
+            <button data-preset="24m" type="button">Last 24m</button>
+          </div>
+        </div>
+
+        <div class="filter filter-actions">
+          <label>&nbsp;</label>
+          <button id="f-apply" type="button" class="btn-primary">
+            Apply filters
+          </button>
+          <button id="f-reset" type="button" class="btn-ghost">Reset</button>
+        </div>
+      </section>
+
+      <!-- ───────── KPIs ───────── -->
+      <section class="kpis" aria-label="Key metrics">
+        <article class="kpi kpi-hero">
+          <div class="kpi-label">Blended CPA</div>
+          <div class="kpi-value" id="kpi-cpa">—</div>
+          <div class="kpi-foot" id="kpi-cpa-foot">
+            full cohort cost ÷ all downstream acquisitions
+          </div>
+        </article>
+
+        <article class="kpi">
+          <div class="kpi-label">Total cost</div>
+          <div class="kpi-value" id="kpi-cost">—</div>
+        </article>
+        <article class="kpi">
+          <div class="kpi-label">Total leads</div>
+          <div class="kpi-value" id="kpi-leads">—</div>
+        </article>
+        <article class="kpi">
+          <div class="kpi-label">Total acquisitions</div>
+          <div class="kpi-value" id="kpi-acq">—</div>
+        </article>
+
+        <article class="kpi kpi-split">
+          <div class="kpi-label">Acquisitions by horizon</div>
+          <div class="kpi-grid">
+            <div>
+              <div class="kpi-sub">Same month</div>
+              <div class="kpi-sub-value" id="kpi-acq-0">—</div>
+            </div>
+            <div>
+              <div class="kpi-sub">≤ 3 months</div>
+              <div class="kpi-sub-value" id="kpi-acq-3">—</div>
+            </div>
+            <div>
+              <div class="kpi-sub">≤ 6 months</div>
+              <div class="kpi-sub-value" id="kpi-acq-6">—</div>
+            </div>
+            <div>
+              <div class="kpi-sub">≤ 12 months</div>
+              <div class="kpi-sub-value" id="kpi-acq-12">—</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <!-- Active filter chips -->
+      <div id="chips" class="chips" hidden></div>
+
+      <!-- ───────── Heatmap ───────── -->
+      <section class="panel">
+        <header class="panel-hdr">
+          <div>
+            <h2>Downstream cohort heatmap</h2>
+            <p class="panel-sub">
+              Rows = downstream media channel · Columns = months from initial
+              lead. <strong>Click any cell</strong> to inspect contributing cohorts.
+            </p>
+          </div>
+          <div class="panel-hdr-right">
+            <div class="seg" role="tablist" aria-label="Metric">
+              <button role="tab" aria-selected="true" data-metric="acq" class="seg-btn active">Acquisitions</button>
+              <button role="tab" data-metric="leads" class="seg-btn">Leads</button>
+              <button role="tab" data-metric="cpa" class="seg-btn">CPA</button>
+            </div>
+            <button id="fullscreen-heatmap" class="icon-btn" title="Expand heatmap" aria-label="Expand heatmap">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+            </button>
+          </div>
+        </header>
+        <div id="heatmap" class="chart"></div>
+        <details class="methodology">
+          <summary>How CPA is calculated</summary>
+          <p>
+            <strong>Cost</strong> belongs to a cohort
+            (<code>InitialCampaignID</code> + <code>AggInitialLeadDate</code>),
+            not to each downstream Media×MonthBucket cell. To prevent
+            double-counting the SQL emits cost on the first row per cohort and
+            <code>NULL</code> on the rest; the dashboard sums it once per
+            cohort.
+          </p>
+          <p>
+            <strong>Blended CPA</strong> (the headline number) =
+            <code>Σ cohort cost ÷ Σ acquisitions</code> across every downstream
+            media and every month-bucket in the selection.
+          </p>
+          <p>
+            <strong>Cell CPA in the heatmap</strong> uses the
+            <em>full selected-cohort cost</em> in the numerator, divided by the
+            acquisitions in that media×month cell. This answers “if I’ve spent
+            $X on this cohort, what does a customer from this channel in this
+            month cost me?”
+          </p>
+          <p class="muted">
+            Trade-off: cell CPA is high in the long tail because the same full
+            cost is divided by a small slice of acquisitions. The alternative —
+            allocating cost across cells proportionally to acquisitions — makes
+            every cell look identical to the blended CPA and hides timing
+            information. We prefer option 1 because comparing a cell CPA to
+            the blended CPA tells you exactly how much that channel-month
+            improves your unit economics.
+          </p>
+        </details>
+      </section>
+
+      <!-- ───────── Secondary: cumulative + cohort table ───────── -->
+      <section class="grid-2">
+        <article class="panel">
+          <header class="panel-hdr">
+            <div>
+              <h2>Cumulative acquisitions &amp; CPA decay</h2>
+              <p class="panel-sub">
+                Acquisitions accumulate while cost stays fixed → CPA falls.
+              </p>
+            </div>
+          </header>
+          <div id="cumchart" class="chart chart-sm"></div>
+        </article>
+
+        <article class="panel">
+          <header class="panel-hdr">
+            <div>
+              <h2>Top cohorts</h2>
+              <p class="panel-sub">
+                Ranked by total acquisitions across all downstream months.
+              </p>
+            </div>
+            <button id="export-csv" type="button" class="btn-ghost">
+              Export CSV
+            </button>
+          </header>
+          <div class="table-wrap">
+            <table id="cohort-table" class="data-table sortable">
+              <thead>
+                <tr>
+                  <th data-sort="InitialMedia">Initial media</th>
+                  <th data-sort="InitialCampaignID">Campaign</th>
+                  <th data-sort="AggInitialLeadDate">Cohort month</th>
+                  <th data-sort="cost" class="num">Cost</th>
+                  <th data-sort="leads" class="num">Leads</th>
+                  <th data-sort="acq" class="num sort-active sort-desc">Acq.</th>
+                  <th data-sort="cpa" class="num">CPA</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="table-foot">Click a row to focus the dashboard on that single cohort.</div>
+          </div>
+        </article>
+      </section>
+
+      <footer class="ftr">
+        <span>Cohort key = InitialCampaignID + AggInitialLeadDate</span>
+        <span class="dot">·</span>
+        <span>Data refreshed via <code>scripts/convert.py</code></span>
+        <span class="dot">·</span>
+        <span id="ftr-version">v1</span>
+      </footer>
+    </main>
+
+    <!-- Drill-in modal -->
+    <div id="modal" class="modal" hidden role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-panel">
+        <header class="modal-hdr">
+          <div>
+            <div class="modal-eyebrow" id="modal-eyebrow">Cell inspection</div>
+            <h3 id="modal-title">Drill-in</h3>
+          </div>
+          <button class="icon-btn" data-close aria-label="Close">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+          </button>
+        </header>
+        <div class="modal-stats" id="modal-stats"></div>
+        <div class="modal-body">
+          <div class="modal-sub">Top cohorts contributing to this cell</div>
+          <div class="table-wrap">
+            <table class="data-table" id="modal-table">
+              <thead>
+                <tr>
+                  <th>Initial media</th>
+                  <th>Campaign</th>
+                  <th>Cohort month</th>
+                  <th class="num">Leads</th>
+                  <th class="num">Acq.</th>
+                  <th class="num">Cohort cost</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast" hidden></div>
+
+    <!-- App -->
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
