@@ -58,12 +58,15 @@
             <div class="meta-label">Date range</div>
             <div id="meta-range" class="meta-value">—</div>
           </div>
+          <button id="theme-toggle" class="icon-btn" title="Toggle light / dark theme" aria-label="Toggle theme">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+          </button>
           <button id="share-link" class="btn-ghost btn-sm" title="Copy a link that reproduces this view">Copy view link</button>
         </div>
       </header>
 
       <!-- ───────── Filters ───────── -->
-      <section class="filters" aria-label="Filters">
+      <section class="filters sticky" aria-label="Filters">
         <div class="filter">
           <label for="f-initial-media">Initial media</label>
           <select id="f-initial-media" multiple size="3"></select>
@@ -156,8 +159,26 @@
         </article>
       </section>
 
-      <!-- Active filter chips -->
+      <!-- Breadcrumb + active filter chips -->
+      <nav id="breadcrumbs" class="breadcrumbs" aria-label="Drill-down path" hidden></nav>
       <div id="chips" class="chips" hidden></div>
+
+      <!-- ───────── Vintage year strip ───────── -->
+      <section class="panel vintage-strip-panel" aria-label="Cohort vintage year">
+        <header class="panel-hdr">
+          <div>
+            <h2>Cohort vintage</h2>
+            <p class="panel-sub">
+              Initial-lead year. Cohorts behave differently depending on when
+              they entered — click a year to filter, click again to clear.
+            </p>
+          </div>
+          <div class="panel-hdr-right">
+            <button id="vintage-compare-toggle" class="btn-ghost btn-sm" title="Pin two years side-by-side in the trend chart">Compare mode: off</button>
+          </div>
+        </header>
+        <div id="year-strip" class="year-strip"></div>
+      </section>
 
       <!-- ───────── Heatmap ───────── -->
       <section class="panel">
@@ -215,6 +236,54 @@
         </details>
       </section>
 
+      <!-- ───────── Vintage trend (lead-month behavior) ───────── -->
+      <section class="panel">
+        <header class="panel-hdr">
+          <div>
+            <h2>Vintage trend by initial-lead month</h2>
+            <p class="panel-sub">
+              How each <em>cohort vintage</em> behaves — pick a metric to see how
+              <strong>when</strong> the lead came in changes the outcome.
+            </p>
+          </div>
+          <div class="panel-hdr-right">
+            <div class="seg" role="tablist" aria-label="Vintage metric">
+              <button role="tab" data-vmetric="cpa" aria-selected="true" class="seg-btn active">CPA</button>
+              <button role="tab" data-vmetric="acq" class="seg-btn">Acquisitions</button>
+              <button role="tab" data-vmetric="leads" class="seg-btn">Leads</button>
+              <button role="tab" data-vmetric="cost" class="seg-btn">Cost</button>
+            </div>
+            <div class="seg" role="tablist" aria-label="Group by initial media">
+              <button role="tab" data-vsplit="all" aria-selected="true" class="seg-btn active">All</button>
+              <button role="tab" data-vsplit="media" class="seg-btn">By initial media</button>
+            </div>
+          </div>
+        </header>
+        <div id="vintagechart" class="chart chart-md"></div>
+      </section>
+
+      <!-- ───────── Vintage maturation heatmap ───────── -->
+      <section class="panel">
+        <header class="panel-hdr">
+          <div>
+            <h2>Vintage maturation heatmap</h2>
+            <p class="panel-sub">
+              Rows = initial-lead year · Columns = months since first lead.
+              <strong>Click a cell</strong> to drill into that vintage × maturity
+              bucket.
+            </p>
+          </div>
+          <div class="panel-hdr-right">
+            <div class="seg" role="tablist" aria-label="Vintage heatmap metric">
+              <button role="tab" data-yhmetric="cpa" aria-selected="true" class="seg-btn active">CPA</button>
+              <button role="tab" data-yhmetric="acq" class="seg-btn">Acquisitions</button>
+              <button role="tab" data-yhmetric="leads" class="seg-btn">Leads</button>
+            </div>
+          </div>
+        </header>
+        <div id="vintageheatmap" class="chart chart-md"></div>
+      </section>
+
       <!-- ───────── Secondary: cumulative + cohort table ───────── -->
       <section class="grid-2">
         <article class="panel">
@@ -237,9 +306,15 @@
                 Ranked by total acquisitions across all downstream months.
               </p>
             </div>
-            <button id="export-csv" type="button" class="btn-ghost">
-              Export CSV
-            </button>
+            <div class="panel-hdr-right">
+              <div class="seg" role="tablist" aria-label="Density">
+                <button role="tab" data-density="comfortable" aria-selected="true" class="seg-btn active">Comfortable</button>
+                <button role="tab" data-density="compact" class="seg-btn">Compact</button>
+              </div>
+              <button id="export-csv" type="button" class="btn-ghost btn-sm">
+                Export CSV
+              </button>
+            </div>
           </header>
           <div class="table-wrap">
             <table id="cohort-table" class="data-table sortable">
@@ -284,11 +359,12 @@
           </button>
         </header>
         <div class="modal-stats" id="modal-stats"></div>
+        <div id="modal-spark" class="modal-spark" hidden></div>
         <div class="modal-body">
-          <div class="modal-sub">Top cohorts contributing to this cell</div>
+          <div class="modal-sub" id="modal-sub">Top cohorts contributing to this cell</div>
           <div class="table-wrap">
             <table class="data-table" id="modal-table">
-              <thead>
+              <thead id="modal-thead">
                 <tr>
                   <th>Initial media</th>
                   <th>Campaign</th>
@@ -302,6 +378,9 @@
             </table>
           </div>
         </div>
+        <footer class="modal-ftr" id="modal-ftr" hidden>
+          <button id="modal-apply" class="btn-primary btn-sm">Filter dashboard to these cohorts</button>
+        </footer>
       </div>
     </div>
 

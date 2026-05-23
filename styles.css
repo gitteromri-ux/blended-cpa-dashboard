@@ -804,3 +804,172 @@ body::before {
     height: 460px;
   }
 }
+
+/* ─────────────── v2 additions ─────────────── */
+
+/* Chart sizes */
+.chart-md { height: 420px; }
+
+/* Sticky filters */
+.filters.sticky {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  backdrop-filter: saturate(140%) blur(10px);
+  background: rgba(15, 20, 17, 0.86);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Breadcrumbs */
+.breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin: 14px 0 -2px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.breadcrumbs[hidden] { display: none; }
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.crumb:hover { background: var(--surface-3); border-color: var(--border-strong); }
+.crumb-sep { color: var(--text-faint); user-select: none; }
+.crumb-root { color: var(--text-muted); background: transparent; }
+
+/* Year strip */
+.vintage-strip-panel { padding-bottom: 14px; }
+.year-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.year-chip {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--mono);
+  cursor: pointer;
+  min-width: 96px;
+  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.year-chip:hover {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.year-chip.active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary-glow) inset;
+}
+.year-chip.pinned {
+  background: rgba(232, 175, 52, 0.12);
+  border-color: var(--gold);
+}
+.year-chip-year {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.year-chip-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.year-chip-bar {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 6px;
+  height: 3px;
+  border-radius: 3px;
+  background: linear-gradient(to right, var(--primary-strong), var(--primary));
+  opacity: 0.7;
+}
+
+/* Modal sparkline */
+.modal-spark {
+  height: 140px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin: 6px 0 12px;
+}
+.modal-spark[hidden] { display: none; }
+
+/* Modal footer */
+.modal-ftr {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+.modal-ftr[hidden] { display: none; }
+
+/* Compact table density */
+.data-table.compact td,
+.data-table.compact th {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.data-table.compact tr { height: auto; }
+
+/* Light theme overrides */
+:root[data-theme="light"] {
+  --bg: #f6f4ef;
+  --surface: #ffffff;
+  --surface-2: #f0ede5;
+  --surface-3: #e6e2d6;
+  --border: #d8d2c2;
+  --border-strong: #b9b09a;
+  --text: #1a1f1c;
+  --text-muted: #5e6962;
+  --text-faint: #8b9389;
+  --primary-soft: rgba(32, 128, 141, 0.10);
+  --primary-glow: rgba(32, 128, 141, 0.25);
+}
+:root[data-theme="light"] body {
+  background: var(--bg);
+}
+:root[data-theme="light"] .filters.sticky {
+  background: rgba(246, 244, 239, 0.88);
+}
+:root[data-theme="light"] .hdr-title-serif {
+  color: var(--primary-strong);
+}
+
+/* Modal panel size for richer drill-in */
+@media (min-width: 900px) {
+  .modal-panel { max-width: 980px; }
+}
+
+/* Improve cohort row hover */
+#cohort-table tbody tr {
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+#cohort-table tbody tr:hover {
+  background: var(--surface-2);
+}

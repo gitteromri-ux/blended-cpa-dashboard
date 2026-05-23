@@ -72,6 +72,19 @@ const state = {
   cumchart: null,
   sort: { key: "acq", dir: "desc" },
   lastTableRows: [],
+  vmetric: "cpa",            // vintage line: cpa | acq | leads | cost
+  vsplit: "all",              // vintage line: all | media
+  yhmetric: "cpa",            // vintage heatmap: cpa | acq | leads
+  vintagechart: null,
+  vintageheatmap: null,
+  modalSpark: null,
+  yearList: [],               // [{year, cohorts, leads, acq, cost, cpa}]
+  selectedYear: null,         // currently filtered year (number) or null
+  pinnedYears: [],            // for compare mode
+  compareMode: false,
+  density: "comfortable",
+  theme: "dark",
+  rowNormalize: false,
 };
 
 // ---------------------------------------------------------------
@@ -235,6 +248,47 @@ function renderCampaignOptions(query) {
 }
 
 // ---------------------------------------------------------------
+// Theme-aware chart palette (reads live CSS variables)
+// ---------------------------------------------------------------
+function themeColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n, fb) => (cs.getPropertyValue(n).trim() || fb);
+  const isLight = document.documentElement.dataset.theme === "light";
+  return {
+    fg: v("--text", "#e8ece9"),
+    muted: v("--text-muted", "#97a39b"),
+    faint: v("--text-faint", "#5e6d65"),
+    line: v("--surface-3", "#3a4842"),
+    grid: v("--surface-2", "#1c241f"),
+    surface: v("--surface", "#161c19"),
+    tooltipBg: isLight ? "rgba(255,255,255,0.98)" : "rgba(22,28,25,0.96)",
+    // On light bg use a soft dark border so heatmap cells are separated; on dark bg use the existing near-black
+    cellBorder: isLight ? "rgba(26,31,28,0.18)" : "rgba(15,20,17,0.75)",
+    // A darker low-end of the heatmap ramp for light mode so light cells aren't invisible
+    heatmapRampSeq: isLight
+      ? ["#e6e2d6", "#9fd0d7", "#4f98a3", "#20808d", "#1d595e", "#15403f"]
+      : ["#1d2a26", "#1d595e", "#20808d", "#4f98a3", "#9fd0d7", "#e8f5f6"],
+    heatmapRampCPA: isLight
+      ? ["#15403f", "#20808d", "#4f98a3", "#e8af34", "#c46546"]
+      : ["#20808d", "#4f98a3", "#bce2e7", "#e8af34", "#c46546"],
+    isLight,
+  };
+}
+
+// Returns a readable text color (black or white) for a given hex fill
+function readableOn(hex) {
+  if (!hex || typeof hex !== "string") return "#e8ece9";
+  const m = hex.replace("#", "");
+  if (m.length !== 6) return "#e8ece9";
+  const r = parseInt(m.slice(0, 2), 16),
+        g = parseInt(m.slice(2, 4), 16),
+        b = parseInt(m.slice(4, 6), 16);
+  // Relative luminance
+  const L = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return L > 0.6 ? "#1a1f1c" : "#f4f6f4";
+}
+
+// ---------------------------------------------------------------
 // Main refresh — recompute KPIs + charts under current filters
 // ---------------------------------------------------------------
 async function refresh() {
@@ -349,7 +403,689 @@ async function refresh() {
   state.lastTableRows = cohorts;
   paintTable();
   renderChips();
+  renderBreadcrumbs();
   writeUrlState();
+
+  // ── v2: vintage analyses run in parallel ──
+  await Promise.all([
+    refreshVintageStrip(where, params),
+    refreshVintageChart(where, params),
+    refreshVintageHeatmap(where, params),
+  ]);
+}
+
+// ---------------------------------------------------------------
+// v2: Vintage year strip
+// ---------------------------------------------------------------
+async function refreshVintageStrip(where, params) {
+  const rows = await q(
+    `
+    WITH base AS ( SELECT * FROM cohorts WHERE ${where} ),
+    cost_per_cohort AS (
+      SELECT CohortKey, EXTRACT(YEAR FROM AggInitialLeadDate) AS y, MAX(Cost) AS cost
+      FROM base GROUP BY CohortKey, y
+    ),
+    base_y AS (
+      SELECT EXTRACT(YEAR FROM AggInitialLeadDate) AS y,
+             SUM(Leads) AS leads, SUM(Acquisitions) AS acq
+      FROM base GROUP BY y
+    ),
+    cost_y AS (
+      SELECT y, SUM(cost) AS cost, COUNT(*) AS cohorts FROM cost_per_cohort GROUP BY y
+    )
+    SELECT b.y AS year, b.leads, b.acq, c.cost, c.cohorts
+    FROM base_y b LEFT JOIN cost_y c USING(y)
+    ORDER BY b.y
+    `,
+    params
+  );
+  state.yearList = rows.map((r) => ({
+    year: Number(r.year),
+    leads: Number(r.leads || 0),
+    acq: Number(r.acq || 0),
+    cost: Number(r.cost || 0),
+    cohorts: Number(r.cohorts || 0),
+    cpa: Number(r.acq || 0) > 0 ? Number(r.cost || 0) / Number(r.acq) : null,
+  }));
+  paintYearStrip();
+}
+
+function paintYearStrip() {
+  const wrap = document.getElementById("year-strip");
+  if (!state.yearList.length) {
+    wrap.innerHTML = `<div class="muted" style="color:var(--text-muted);font-size:12px">No cohorts in current filter</div>`;
+    return;
+  }
+  const maxAcq = Math.max(...state.yearList.map((y) => y.acq || 0)) || 1;
+  wrap.innerHTML = state.yearList
+    .map((y) => {
+      const isActive = state.selectedYear === y.year;
+      const isPinned = state.pinnedYears.includes(y.year);
+      const cls = ["year-chip"];
+      if (isActive) cls.push("active");
+      if (isPinned) cls.push("pinned");
+      const widthPct = Math.max(4, Math.round((y.acq / maxAcq) * 100));
+      const cpaTxt = y.cpa == null ? "—" : fmtMoney.format(Math.round(y.cpa));
+      return `
+        <button class="${cls.join(" ")}" data-year="${y.year}" title="${y.cohorts} cohorts · ${fmtInt.format(y.acq)} acq · CPA ${cpaTxt}">
+          <span class="year-chip-year">${y.year}</span>
+          <span class="year-chip-meta">${fmtInt.format(y.acq)} acq · ${cpaTxt}</span>
+          <span class="year-chip-bar" style="width:${widthPct}%"></span>
+        </button>
+      `;
+    })
+    .join("");
+  wrap.querySelectorAll(".year-chip").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      const yr = Number(el.dataset.year);
+      if (state.compareMode) {
+        const idx = state.pinnedYears.indexOf(yr);
+        if (idx >= 0) state.pinnedYears.splice(idx, 1);
+        else {
+          state.pinnedYears.push(yr);
+          if (state.pinnedYears.length > 2) state.pinnedYears.shift();
+        }
+        paintYearStrip();
+        refreshVintageChart(...whereTuple());
+      } else {
+        // toggle single-year filter
+        if (state.selectedYear === yr) {
+          state.selectedYear = null;
+          state.filters.dateFrom = null;
+          state.filters.dateTo = null;
+          document.getElementById("f-date-from").value = "";
+          document.getElementById("f-date-to").value = "";
+        } else {
+          state.selectedYear = yr;
+          state.filters.dateFrom = `${yr}-01-01`;
+          state.filters.dateTo = `${yr}-12-01`;
+          document.getElementById("f-date-from").value = `${yr}-01`;
+          document.getElementById("f-date-to").value = `${yr}-12`;
+        }
+        document.querySelectorAll(".presets button").forEach((x) => x.classList.remove("active"));
+        refresh();
+      }
+    });
+  });
+}
+
+function whereTuple() {
+  const w = whereClause();
+  return [w.sql, w.params];
+}
+
+// ---------------------------------------------------------------
+// v2: Vintage trend line chart
+// ---------------------------------------------------------------
+async function refreshVintageChart(where, params) {
+  const wantsSplit = state.vsplit === "media";
+  const groupCols = wantsSplit ? "AggInitialLeadDate, InitialMedia" : "AggInitialLeadDate";
+  const selectCols = wantsSplit
+    ? "AggInitialLeadDate AS d, InitialMedia AS series"
+    : "AggInitialLeadDate AS d, 'All' AS series";
+  // When compare mode + pinned years, ignore date filter, restrict to pinned years
+  let extra = "";
+  const extraParams = [];
+  if (state.compareMode && state.pinnedYears.length) {
+    extra = ` AND EXTRACT(YEAR FROM AggInitialLeadDate) IN (${state.pinnedYears.map(() => "?").join(",")}) `;
+    extraParams.push(...state.pinnedYears);
+  }
+  const rows = await q(
+    `
+    WITH base AS ( SELECT * FROM cohorts WHERE ${where} ${extra} ),
+    cost_per_cohort AS (
+      SELECT CohortKey, AggInitialLeadDate, InitialMedia, MAX(Cost) AS cost
+      FROM base GROUP BY CohortKey, AggInitialLeadDate, InitialMedia
+    ),
+    leads_acq AS (
+      SELECT ${selectCols}, SUM(Leads) AS leads, SUM(Acquisitions) AS acq
+      FROM base GROUP BY ${groupCols}
+    ),
+    costs AS (
+      SELECT AggInitialLeadDate AS d, ${wantsSplit ? "InitialMedia AS series," : "'All' AS series,"}
+             SUM(cost) AS cost
+      FROM cost_per_cohort GROUP BY AggInitialLeadDate${wantsSplit ? ", InitialMedia" : ""}
+    )
+    SELECT la.d AS d, la.series AS series, la.leads, la.acq, COALESCE(c.cost, 0) AS cost
+    FROM leads_acq la LEFT JOIN costs c ON la.d = c.d AND la.series = c.series
+    ORDER BY la.d
+    `,
+    [...params, ...extraParams]
+  );
+  paintVintageChart(rows);
+}
+
+function paintVintageChart(rows) {
+  const el = document.getElementById("vintagechart");
+  if (!state.vintagechart) state.vintagechart = echarts.init(el, null, { renderer: "canvas" });
+
+  // Group by series
+  const bySeries = new Map();
+  for (const r of rows) {
+    if (!bySeries.has(r.series)) bySeries.set(r.series, []);
+    bySeries.get(r.series).push(r);
+  }
+  const series = [];
+  const palette = ["#4f98a3", "#e8af34", "#c46546", "#9fd0d7", "#76a09a", "#d1a05c", "#8c6f5a", "#bce2e7", "#5e7d77", "#a07d52"];
+  let i = 0;
+  for (const [name, arr] of bySeries) {
+    arr.sort((a, b) => new Date(a.d) - new Date(b.d));
+    const data = arr.map((r) => {
+      const d = (typeof r.d === "string" ? r.d : new Date(r.d).toISOString()).slice(0, 10);
+      let v;
+      const acq = Number(r.acq || 0);
+      const leads = Number(r.leads || 0);
+      const cost = Number(r.cost || 0);
+      if (state.vmetric === "cpa") v = acq > 0 ? cost / acq : null;
+      else if (state.vmetric === "acq") v = acq;
+      else if (state.vmetric === "leads") v = leads;
+      else v = cost;
+      return [d, v];
+    });
+    series.push({
+      name,
+      type: "line",
+      smooth: true,
+      symbol: "circle",
+      symbolSize: 6,
+      showSymbol: arr.length < 60,
+      data,
+      itemStyle: { color: palette[i % palette.length] },
+      lineStyle: { width: 2 },
+      areaStyle: bySeries.size === 1 ? { opacity: 0.12 } : undefined,
+      connectNulls: false,
+      emphasis: { focus: "series" },
+    });
+    i++;
+  }
+
+  const isCPA = state.vmetric === "cpa";
+  const fmt = (v) => {
+    if (v == null) return "—";
+    if (isCPA || state.vmetric === "cost") return fmtMoney.format(Math.round(v));
+    return fmtInt.format(Math.round(v));
+  };
+
+  state.vintagechart.setOption(
+    {
+      backgroundColor: "transparent",
+      tooltip: {
+        trigger: "axis",
+        backgroundColor: themeColors().tooltipBg,
+        borderColor: "#3a4842",
+        backgroundColor: themeColors().tooltipBg,
+        borderColor: themeColors().line,
+        textStyle: { color: themeColors().fg, fontFamily: "Inter" },
+        formatter: (params) => {
+          if (!params?.length) return "";
+          const lines = params
+            .filter((p) => p.value && p.value[1] != null)
+            .sort((a, b) => (b.value[1] || 0) - (a.value[1] || 0))
+            .map(
+              (p) =>
+                `<div style="display:flex;justify-content:space-between;gap:18px"><span>${p.marker} ${escapeHTML(p.seriesName)}</span><b>${fmt(p.value[1])}</b></div>`
+            )
+            .join("");
+          return `<div style="font-size:12px"><div style="font-weight:600;margin-bottom:6px">${params[0].axisValueLabel}</div>${lines}</div>`;
+        },
+      },
+      legend: bySeries.size > 1
+        ? {
+            top: 0,
+            right: 0,
+            textStyle: { color: themeColors().muted, fontFamily: "Inter", fontSize: 11 },
+            icon: "roundRect",
+          }
+        : { show: false },
+      grid: { left: 70, right: 24, top: 36, bottom: 60 },
+      dataZoom: [
+        { type: "inside", throttle: 50 },
+        {
+          type: "slider",
+          height: 18,
+          bottom: 16,
+          backgroundColor: "#161c19",
+          fillerColor: "rgba(79,152,163,0.18)",
+          borderColor: "#2a342d",
+          handleStyle: { color: "#4f98a3" },
+          textStyle: { color: themeColors().muted, fontSize: 10 },
+        },
+      ],
+      xAxis: {
+        type: "time",
+        axisLine: { lineStyle: { color: themeColors().line } },
+        axisLabel: { color: themeColors().muted, fontFamily: "JetBrains Mono", fontSize: 11 },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        type: "value",
+        axisLine: { lineStyle: { color: themeColors().line } },
+        axisLabel: { color: themeColors().muted,
+          fontFamily: "JetBrains Mono",
+          fontSize: 11,
+          formatter: (v) => {
+            if (isCPA || state.vmetric === "cost") return `$${v >= 1000 ? Math.round(v / 100) / 10 + "k" : Math.round(v)}`;
+            if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+            return v;
+          },
+        },
+        splitLine: { lineStyle: { color: themeColors().grid } },
+      },
+      series,
+    },
+    true
+  );
+  if (!state._vcBound) {
+    window.addEventListener("resize", () => state.vintagechart?.resize());
+    state._vcBound = true;
+  }
+}
+
+// ---------------------------------------------------------------
+// v2: Vintage maturation heatmap (Year x MonthBucket)
+// ---------------------------------------------------------------
+async function refreshVintageHeatmap(where, params) {
+  const rows = await q(
+    `
+    WITH base AS ( SELECT * FROM cohorts WHERE ${where} ),
+    cost_per_cohort AS (
+      SELECT CohortKey, EXTRACT(YEAR FROM AggInitialLeadDate) AS y, MAX(Cost) AS cost
+      FROM base GROUP BY CohortKey, y
+    ),
+    cost_by_year AS (
+      SELECT y, SUM(cost) AS cost FROM cost_per_cohort GROUP BY y
+    ),
+    cells AS (
+      SELECT EXTRACT(YEAR FROM AggInitialLeadDate) AS y,
+             MonthBucket AS b,
+             SUM(Leads) AS leads, SUM(Acquisitions) AS acq
+      FROM base GROUP BY y, MonthBucket
+    )
+    SELECT c.y AS year, c.b AS bucket, c.leads, c.acq, COALESCE(cy.cost, 0) AS year_cost
+    FROM cells c LEFT JOIN cost_by_year cy ON c.y = cy.y
+    `,
+    params
+  );
+  paintVintageHeatmap(rows);
+}
+
+function paintVintageHeatmap(rows) {
+  const el = document.getElementById("vintageheatmap");
+  if (!state.vintageheatmap) state.vintageheatmap = echarts.init(el, null, { renderer: "canvas" });
+
+  const yearsSet = new Set();
+  const bucketsSet = new Set();
+  for (const r of rows) {
+    yearsSet.add(Number(r.year));
+    bucketsSet.add(r.bucket);
+  }
+  const years = Array.from(yearsSet).sort((a, b) => a - b);
+  const buckets = Array.from(bucketsSet).sort(
+    (a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b)
+  );
+
+  const lookup = new Map();
+  for (const r of rows) {
+    lookup.set(`${Number(r.year)}|${r.bucket}`, {
+      leads: Number(r.leads || 0),
+      acq: Number(r.acq || 0),
+      yearCost: Number(r.year_cost || 0),
+    });
+  }
+
+  const positives = [];
+  const cells = [];
+  for (let y = 0; y < years.length; y++) {
+    for (let x = 0; x < buckets.length; x++) {
+      const c = lookup.get(`${years[y]}|${buckets[x]}`) || { leads: 0, acq: 0, yearCost: 0 };
+      let v;
+      if (state.yhmetric === "leads") v = c.leads;
+      else if (state.yhmetric === "acq") v = c.acq;
+      else v = c.acq > 0 ? c.yearCost / c.acq : null;
+      cells.push({ x, y, v, c, year: years[y], bucket: buckets[x] });
+      if (typeof v === "number" && isFinite(v) && v > 0) positives.push(v);
+    }
+  }
+  const sorted = positives.slice().sort((a, b) => a - b);
+  const p95 = sorted.length ? sorted[Math.floor(0.95 * sorted.length)] : 1;
+  const vmin = sorted.length ? sorted[0] : 0;
+
+  const data = cells.map(({ x, y, v, c }) => {
+    const t = v == null || !isFinite(v) ? 0 : Math.min(1, v / (p95 || 1));
+    const labelColor = readableOn(c);
+    return [x, y, v, c, labelColor];
+  });
+
+  const isCPA = state.yhmetric === "cpa";
+  const visualMap = isCPA
+    ? { min: vmin, max: p95, inRange: { color: themeColors().heatmapRampCPA } }
+    : { min: 0, max: p95, inRange: { color: themeColors().heatmapRampSeq } };
+
+  state.vintageheatmap.setOption(
+    {
+      backgroundColor: "transparent",
+      tooltip: {
+        backgroundColor: themeColors().tooltipBg,
+        borderColor: "#3a4842",
+        textStyle: { color: themeColors().fg, fontFamily: "Inter" },
+        formatter: (p) => {
+          const c = p.data[3];
+          const year = years[p.value[1]];
+          const bucket = buckets[p.value[0]];
+          const cpa = c.acq > 0 ? c.yearCost / c.acq : null;
+          return `
+            <div style="font-size:12px;line-height:1.5">
+              <div style="font-weight:600;margin-bottom:6px">Vintage ${year} · month ${escapeHTML(bucket)}</div>
+              <div>Leads&nbsp;&nbsp;&nbsp;<b>${fmtInt.format(c.leads)}</b></div>
+              <div>Acquisitions&nbsp;<b>${fmtInt.format(c.acq)}</b></div>
+              <div>Cell CPA&nbsp;&nbsp;<b>${cpa == null ? "—" : fmtMoney.format(Math.round(cpa))}</b></div>
+              <div style="margin-top:6px;color:#97a39b;font-size:11px">Year cost: ${fmtMoney.format(Math.round(c.yearCost))}</div>
+            </div>`;
+        },
+      },
+      grid: { left: 70, right: 30, top: 18, bottom: 60 },
+      xAxis: {
+        type: "category",
+        data: buckets.map((b) => (b === "12+" ? "12+" : b === "<0" ? "<0" : `M${b}`)),
+        axisLine: { lineStyle: { color: themeColors().line } },
+        axisLabel: { color: themeColors().muted, fontFamily: "JetBrains Mono", fontSize: 11 },
+        name: "Months from initial lead",
+        nameLocation: "middle",
+        nameGap: 36,
+        nameTextStyle: { color: themeColors().faint, fontSize: 11 },
+      },
+      yAxis: {
+        type: "category",
+        data: years,
+        axisLine: { lineStyle: { color: themeColors().line } },
+        axisLabel: { color: themeColors().fg, fontFamily: "JetBrains Mono", fontSize: 12 },
+      },
+      visualMap: {
+        ...visualMap,
+        calculable: true,
+        orient: "horizontal",
+        left: "center",
+        bottom: 4,
+        itemWidth: 14,
+        itemHeight: 220,
+        text: [isCPA ? "higher CPA" : "more", isCPA ? "lower CPA" : "fewer"],
+        textStyle: { color: themeColors().muted, fontFamily: "JetBrains Mono", fontSize: 11 },
+        formatter: (v) => (isCPA ? fmtMoney.format(Math.round(v || 0)) : fmtInt.format(Math.round(v || 0))),
+      },
+      series: [
+        {
+          type: "heatmap",
+          data,
+          label: {
+            show: true,
+            fontFamily: "JetBrains Mono",
+            fontSize: 10,
+            color: (p) => p.data?.[4] || themeColors().fg,
+            formatter: (p) => {
+              const v = p.data[2];
+              if (v == null || v === 0) return "";
+              if (isCPA) return v >= 1000 ? `$${Math.round(v / 100) / 10}k` : `$${Math.round(v)}`;
+              if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+              return String(v);
+            },
+          },
+          itemStyle: { borderColor: themeColors().cellBorder, borderWidth: 1 },
+          emphasis: {
+            itemStyle: { shadowBlur: 12, shadowColor: "rgba(232,175,52,0.55)", borderColor: "#e8ece9", borderWidth: 1 },
+          },
+        },
+      ],
+    },
+    true
+  );
+
+  if (!state._vhBound) {
+    window.addEventListener("resize", () => state.vintageheatmap?.resize());
+    state._vhBound = true;
+  }
+
+  // Click → drill into vintage × bucket
+  if (!state._vhClickBound) {
+    state.vintageheatmap.on("click", async (params) => {
+      if (!params || !params.data) return;
+      const [x, y] = params.value;
+      const year = years[y];
+      const bucket = buckets[x];
+      await openVintageCellDrill(year, bucket);
+    });
+    state._vhClickBound = true;
+  }
+}
+
+async function openVintageCellDrill(year, bucket) {
+  const { sql: where, params } = whereClause();
+  const rows = await q(
+    `
+    WITH base AS (
+      SELECT * FROM cohorts WHERE ${where}
+      AND EXTRACT(YEAR FROM AggInitialLeadDate) = ?
+      AND MonthBucket = ?
+    ),
+    per_cohort AS (
+      SELECT InitialMedia, InitialCampaignID, AggInitialLeadDate,
+             SUM(Leads) AS leads, SUM(Acquisitions) AS acq, MAX(Cost) AS cost
+      FROM base GROUP BY 1,2,3
+    )
+    SELECT * FROM per_cohort
+    ORDER BY acq DESC NULLS LAST, leads DESC NULLS LAST
+    LIMIT 100
+    `,
+    [...params, year, bucket]
+  );
+  const totalLeads = rows.reduce((s, r) => s + Number(r.leads || 0), 0);
+  const totalAcq = rows.reduce((s, r) => s + Number(r.acq || 0), 0);
+  // Year cost from already-loaded yearList
+  const yEntry = state.yearList.find((y) => y.year === Number(year));
+  const yearCost = yEntry ? yEntry.cost : 0;
+  const cellCPA = totalAcq > 0 ? yearCost / totalAcq : null;
+
+  document.getElementById("modal-eyebrow").textContent = "Vintage drill-in";
+  document.getElementById("modal-title").textContent = `Vintage ${year} · month ${bucket}`;
+  document.getElementById("modal-stats").innerHTML = `
+    <div class="modal-stat"><div class="modal-stat-label">Leads</div><div class="modal-stat-value">${fmtInt.format(totalLeads)}</div></div>
+    <div class="modal-stat"><div class="modal-stat-label">Acquisitions</div><div class="modal-stat-value">${fmtInt.format(totalAcq)}</div></div>
+    <div class="modal-stat"><div class="modal-stat-label">Contributing cohorts</div><div class="modal-stat-value">${fmtInt.format(rows.length)}</div></div>
+    <div class="modal-stat"><div class="modal-stat-label">Cell CPA</div><div class="modal-stat-value">${cellCPA == null ? "—" : fmtMoney.format(Math.round(cellCPA))}</div></div>
+  `;
+  document.getElementById("modal-sub").textContent = `Top cohorts in this vintage × bucket`;
+  document.getElementById("modal-spark").hidden = true;
+  document.getElementById("modal-ftr").hidden = false;
+
+  const tbody = document.querySelector("#modal-table tbody");
+  tbody.innerHTML = rows
+    .map((r) => {
+      const ym = formatYM(r.AggInitialLeadDate);
+      return `<tr data-media="${escapeAttr(r.InitialMedia)}" data-campaign="${r.InitialCampaignID}" data-date="${ym}-01">
+        <td>${escapeHTML(r.InitialMedia)}</td>
+        <td>#${r.InitialCampaignID}</td>
+        <td>${ym}</td>
+        <td class="num">${fmtInt.format(r.leads || 0)}</td>
+        <td class="num">${fmtInt.format(r.acq || 0)}</td>
+        <td class="num">${r.cost == null ? "—" : fmtMoney.format(r.cost)}</td>
+      </tr>`;
+    })
+    .join("");
+  tbody.querySelectorAll("tr").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      focusCohort(tr.dataset.media, tr.dataset.campaign, tr.dataset.date);
+      closeModal();
+    });
+  });
+
+  // Apply filter button
+  const applyBtn = document.getElementById("modal-apply");
+  applyBtn.onclick = () => {
+    state.selectedYear = Number(year);
+    state.filters.dateFrom = `${year}-01-01`;
+    state.filters.dateTo = `${year}-12-01`;
+    document.getElementById("f-date-from").value = `${year}-01`;
+    document.getElementById("f-date-to").value = `${year}-12`;
+    closeModal();
+    refresh();
+  };
+
+  openModal();
+}
+
+// ---------------------------------------------------------------
+// v2: Per-cohort detail drill (clicking a single row → open detail)
+// ---------------------------------------------------------------
+async function openCohortDrill(media, campaignId, dateISO) {
+  const [r] = await q(
+    `
+    WITH base AS (
+      SELECT * FROM cohorts
+      WHERE InitialMedia = ? AND InitialCampaignID = ? AND AggInitialLeadDate = CAST(? AS DATE)
+    ),
+    per_cohort AS (
+      SELECT MAX(Cost) AS cost, SUM(Leads) AS leads, SUM(Acquisitions) AS acq
+      FROM base
+    )
+    SELECT * FROM per_cohort
+    `,
+    [media, campaignId, dateISO]
+  );
+  const series = await q(
+    `
+    SELECT MonthBucket AS b, SUM(Leads) AS leads, SUM(Acquisitions) AS acq
+    FROM cohorts
+    WHERE InitialMedia = ? AND InitialCampaignID = ? AND AggInitialLeadDate = CAST(? AS DATE)
+      AND MonthBucket NOT IN ('<0')
+    GROUP BY MonthBucket
+    `,
+    [media, campaignId, dateISO]
+  );
+  // Order buckets canonically and build cumulative
+  series.sort((a, b) => MONTH_ORDER.indexOf(a.b) - MONTH_ORDER.indexOf(b.b));
+  let cum = 0;
+  let paybackBucket = null;
+  const cost = Number(r?.cost || 0);
+  const monthly = series.map((row) => {
+    cum += Number(row.acq || 0);
+    if (paybackBucket == null && cum > 0 && cost > 0 && cost / cum <= 500) paybackBucket = row.b; // heuristic
+    return { b: row.b, leads: Number(row.leads || 0), acq: Number(row.acq || 0), cum };
+  });
+
+  const totalAcq = Number(r?.acq || 0);
+  const totalLeads = Number(r?.leads || 0);
+  const cpa = totalAcq > 0 ? cost / totalAcq : null;
+
+  document.getElementById("modal-eyebrow").textContent = "Cohort detail";
+  document.getElementById("modal-title").textContent =
+    `${media} · #${campaignId} · ${dateISO.slice(0, 7)}`;
+  document.getElementById("modal-stats").innerHTML = `
+    <div class="modal-stat"><div class="modal-stat-label">Cost</div><div class="modal-stat-value">${cost ? fmtMoney.format(cost) : "—"}</div></div>
+    <div class="modal-stat"><div class="modal-stat-label">Leads</div><div class="modal-stat-value">${fmtInt.format(totalLeads)}</div></div>
+    <div class="modal-stat"><div class="modal-stat-label">Acquisitions</div><div class="modal-stat-value">${fmtInt.format(totalAcq)}</div></div>
+    <div class="modal-stat"><div class="modal-stat-label">Cohort CPA</div><div class="modal-stat-value">${cpa == null ? "—" : fmtMoney.format(Math.round(cpa))}</div></div>
+  `;
+
+  // Sparkline
+  const sparkEl = document.getElementById("modal-spark");
+  sparkEl.hidden = false;
+  if (!state.modalSpark) state.modalSpark = echarts.init(sparkEl, null, { renderer: "canvas" });
+  const labels = monthly.map((m) => (m.b === "12+" ? "12+" : `M${m.b}`));
+  state.modalSpark.setOption(
+    {
+      backgroundColor: "transparent",
+      tooltip: { trigger: "axis", backgroundColor: themeColors().tooltipBg, textStyle: { color: themeColors().fg } },
+      grid: { left: 50, right: 18, top: 16, bottom: 30 },
+      xAxis: {
+        type: "category",
+        data: labels,
+        axisLine: { lineStyle: { color: themeColors().line } },
+        axisLabel: { color: themeColors().muted, fontSize: 10, fontFamily: "JetBrains Mono" },
+      },
+      yAxis: [
+        {
+          type: "value",
+          axisLine: { lineStyle: { color: themeColors().line } },
+          axisLabel: { color: themeColors().muted, fontSize: 10 },
+          splitLine: { lineStyle: { color: themeColors().grid } },
+        },
+      ],
+      series: [
+        {
+          name: "Acquisitions / month",
+          type: "bar",
+          data: monthly.map((m) => m.acq),
+          itemStyle: { color: "#4f98a3", borderRadius: [3, 3, 0, 0] },
+        },
+        {
+          name: "Cumulative",
+          type: "line",
+          smooth: true,
+          data: monthly.map((m) => m.cum),
+          itemStyle: { color: "#e8af34" },
+          lineStyle: { width: 2 },
+          symbol: "circle",
+          symbolSize: 4,
+        },
+      ],
+    },
+    true
+  );
+  requestAnimationFrame(() => state.modalSpark?.resize());
+
+  document.getElementById("modal-sub").textContent = "Monthly acquisitions vs cumulative";
+  // Hide the table — for cohort detail we don't need cohort list
+  document.querySelector("#modal-table").style.display = "none";
+  document.getElementById("modal-ftr").hidden = false;
+  const applyBtn = document.getElementById("modal-apply");
+  applyBtn.textContent = "Filter dashboard to this cohort";
+  applyBtn.onclick = () => {
+    closeModal();
+    focusCohort(media, campaignId, dateISO);
+  };
+
+  openModal();
+}
+
+// ---------------------------------------------------------------
+// Breadcrumbs
+// ---------------------------------------------------------------
+function renderBreadcrumbs() {
+  const el = document.getElementById("breadcrumbs");
+  const crumbs = [];
+  crumbs.push({ label: "All cohorts", onClick: () => { document.getElementById("f-reset").click(); }, root: true });
+  const f = state.filters;
+  if (f.initialMedia.length === 1) {
+    crumbs.push({ label: f.initialMedia[0], onClick: () => {} });
+  } else if (f.initialMedia.length > 1) {
+    crumbs.push({ label: `${f.initialMedia.length} media`, onClick: () => {} });
+  }
+  if (state.selectedYear || (f.dateFrom && f.dateTo && f.dateFrom.slice(0, 4) === f.dateTo.slice(0, 4))) {
+    crumbs.push({ label: state.selectedYear || f.dateFrom.slice(0, 4), onClick: () => {} });
+  } else if (f.dateFrom || f.dateTo) {
+    crumbs.push({ label: `${f.dateFrom?.slice(0,7) || "…"} → ${f.dateTo?.slice(0,7) || "…"}`, onClick: () => {} });
+  }
+  if (f.campaigns.length === 1) {
+    crumbs.push({ label: `Campaign #${f.campaigns[0]}`, onClick: () => {} });
+  } else if (f.campaigns.length > 1) {
+    crumbs.push({ label: `${f.campaigns.length} campaigns`, onClick: () => {} });
+  }
+
+  if (crumbs.length <= 1) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = crumbs
+    .map((c, i) => {
+      const cls = c.root ? "crumb crumb-root" : "crumb";
+      const sep = i === 0 ? "" : `<span class="crumb-sep">›</span>`;
+      return `${sep}<button class="${cls}" data-i="${i}">${escapeHTML(c.label)}</button>`;
+    })
+    .join("");
+  el.querySelectorAll("[data-i]").forEach((b) => {
+    b.addEventListener("click", () => crumbs[Number(b.dataset.i)].onClick());
+  });
 }
 
 // ---------------------------------------------------------------
@@ -442,7 +1178,7 @@ function paintHeatmap(rows) {
   // Second pass: bake per-cell label color (white on dark cells, dark on bright cells)
   const data = cells.map(({ x, y, v, cell }) => {
     const t = v == null || !isFinite(v) ? 0 : Math.min(1, v / (valP95 || 1));
-    const labelColor = t > 0.55 ? "#0f1411" : "#e8ece9";
+    const labelColor = readableOn(cell);
     return [x, y, v, cell, labelColor];
   });
 
@@ -453,23 +1189,23 @@ function paintHeatmap(rows) {
         // Lower CPA -> primary teal; higher -> warm terra
         min: valMin,
         max: valP95,
-        inRange: { color: ["#20808d", "#4f98a3", "#bce2e7", "#e8af34", "#c46546"] },
+        inRange: { color: themeColors().heatmapRampCPA },
       }
     : {
         // Sequential teal ramp. Start a few shades brighter than the page bg
         // so even single-acquisition cells stay visible.
         min: 0,
         max: valP95,
-        inRange: { color: ["#1d2a26", "#1d595e", "#20808d", "#4f98a3", "#9fd0d7", "#e8f5f6"] },
+        inRange: { color: themeColors().heatmapRampSeq },
       };
 
   const option = {
     backgroundColor: "transparent",
     tooltip: {
-      backgroundColor: "rgba(22, 28, 25, 0.96)",
+      backgroundColor: themeColors().tooltipBg,
       borderColor: "#3a4842",
       borderWidth: 1,
-      textStyle: { color: "#e8ece9", fontFamily: "Inter" },
+      textStyle: { color: themeColors().fg, fontFamily: "Inter" },
       formatter: (p) => {
         const [, , v, cell] = p.data;
         const media = mediasPresent[p.value[1]];
@@ -494,19 +1230,19 @@ function paintHeatmap(rows) {
       type: "category",
       data: bucketsPresent.map((b) => (b === "12+" ? "12+" : b === "<0" ? "<0" : `M${b}`)),
       splitArea: { show: false },
-      axisLine: { lineStyle: { color: "#3a4842" } },
-      axisLabel: { color: "#97a39b", fontFamily: "JetBrains Mono", fontSize: 11 },
+      axisLine: { lineStyle: { color: themeColors().line } },
+      axisLabel: { color: themeColors().muted, fontFamily: "JetBrains Mono", fontSize: 11 },
       name: "Months from initial lead",
       nameLocation: "middle",
       nameGap: 36,
-      nameTextStyle: { color: "#5e6d65", fontSize: 11 },
+      nameTextStyle: { color: themeColors().faint, fontSize: 11 },
     },
     yAxis: {
       type: "category",
       data: mediasPresent,
       splitArea: { show: false },
-      axisLine: { lineStyle: { color: "#3a4842" } },
-      axisLabel: { color: "#e8ece9", fontSize: 12 },
+      axisLine: { lineStyle: { color: themeColors().line } },
+      axisLabel: { color: themeColors().fg, fontSize: 12 },
       inverse: false,
     },
     visualMap: {
@@ -521,7 +1257,7 @@ function paintHeatmap(rows) {
         state.metric === "cpa" ? "higher CPA" : "more",
         state.metric === "cpa" ? "lower CPA" : "fewer",
       ],
-      textStyle: { color: "#97a39b", fontFamily: "JetBrains Mono", fontSize: 11 },
+      textStyle: { color: themeColors().muted, fontFamily: "JetBrains Mono", fontSize: 11 },
       formatter: (v) => {
         if (state.metric === "cpa") return fmtMoney.format(v || 0);
         return fmtInt.format(Math.round(v || 0));
@@ -536,7 +1272,7 @@ function paintHeatmap(rows) {
           show: true,
           fontFamily: "JetBrains Mono",
           fontSize: 10,
-          color: (p) => p.data?.[4] || "#e8ece9",
+          color: (p) => p.data?.[4] || themeColors().fg,
           formatter: (p) => {
             const v = p.data[2];
             if (v == null || v === 0) return "";
@@ -559,7 +1295,7 @@ function paintHeatmap(rows) {
           },
         },
         itemStyle: {
-          borderColor: "rgba(15,20,17,0.75)",
+          borderColor: themeColors().cellBorder,
           borderWidth: 1,
         },
         progressive: 0,
@@ -602,10 +1338,10 @@ function paintCumChart(rows) {
     backgroundColor: "transparent",
     tooltip: {
       trigger: "axis",
-      backgroundColor: "rgba(22, 28, 25, 0.96)",
+      backgroundColor: themeColors().tooltipBg,
       borderColor: "#3a4842",
       borderWidth: 1,
-      textStyle: { color: "#e8ece9", fontFamily: "Inter" },
+      textStyle: { color: themeColors().fg, fontFamily: "Inter" },
       formatter: (params) => {
         const i = params[0].dataIndex;
         return `
@@ -619,25 +1355,24 @@ function paintCumChart(rows) {
     grid: { left: 60, right: 60, top: 30, bottom: 40 },
     legend: {
       data: ["Cumulative acquisitions", "Cumulative CPA"],
-      textStyle: { color: "#97a39b" },
+      textStyle: { color: themeColors().muted },
       top: 0,
       right: 0,
     },
     xAxis: {
       type: "category",
       data: xs,
-      axisLine: { lineStyle: { color: "#3a4842" } },
-      axisLabel: { color: "#97a39b", fontFamily: "JetBrains Mono", fontSize: 11 },
+      axisLine: { lineStyle: { color: themeColors().line } },
+      axisLabel: { color: themeColors().muted, fontFamily: "JetBrains Mono", fontSize: 11 },
     },
     yAxis: [
       {
         type: "value",
         name: "Acquisitions",
-        nameTextStyle: { color: "#5e6d65" },
+        nameTextStyle: { color: themeColors().faint },
         axisLine: { show: false, lineStyle: { color: "#3a4842" } },
-        splitLine: { lineStyle: { color: "#232c26" } },
-        axisLabel: {
-          color: "#97a39b",
+        splitLine: { lineStyle: { color: themeColors().grid } },
+        axisLabel: { color: themeColors().muted,
           fontFamily: "JetBrains Mono",
           fontSize: 11,
           formatter: (v) => (v >= 1000 ? `${v / 1000}k` : v),
@@ -646,11 +1381,10 @@ function paintCumChart(rows) {
       {
         type: "value",
         name: "CPA",
-        nameTextStyle: { color: "#5e6d65" },
+        nameTextStyle: { color: themeColors().faint },
         axisLine: { show: false },
         splitLine: { show: false },
-        axisLabel: {
-          color: "#97a39b",
+        axisLabel: { color: themeColors().muted,
           fontFamily: "JetBrains Mono",
           fontSize: 11,
           formatter: (v) => (v >= 1000 ? `$${v / 1000}k` : `$${v}`),
@@ -831,10 +1565,10 @@ function bindUI() {
     refresh();
   });
 
-  // Metric segmented control
-  document.querySelectorAll(".seg-btn").forEach((b) => {
+  // Metric segmented control (heatmap metric only — scoped to data-metric)
+  document.querySelectorAll(".seg-btn[data-metric]").forEach((b) => {
     b.addEventListener("click", () => {
-      document.querySelectorAll(".seg-btn").forEach((x) => {
+      document.querySelectorAll(".seg-btn[data-metric]").forEach((x) => {
         x.classList.remove("active");
         x.setAttribute("aria-selected", "false");
       });
@@ -857,6 +1591,91 @@ function bindUI() {
   bindShareLink();
   bindFullscreen();
   bindKeyboardShortcuts();
+  bindV2Controls();
+}
+
+// ---------------------------------------------------------------
+// V2 control wiring — vintage segs, density, theme, compare mode
+// ---------------------------------------------------------------
+function bindV2Controls() {
+  // Generic helper: scoped segmented control that updates state[key]
+  const wireSeg = (attr, stateKey, onChange) => {
+    const buttons = document.querySelectorAll(`.seg-btn[data-${attr}]`);
+    buttons.forEach((b) => {
+      b.addEventListener("click", () => {
+        buttons.forEach((x) => {
+          x.classList.remove("active");
+          x.setAttribute("aria-selected", "false");
+        });
+        b.classList.add("active");
+        b.setAttribute("aria-selected", "true");
+        state[stateKey] = b.dataset[attr];
+        if (typeof onChange === "function") onChange(b.dataset[attr]);
+      });
+    });
+  };
+
+  // Vintage line: metric & split
+  wireSeg("vmetric", "vmetric", () => {
+    const [w, p] = whereTuple();
+    refreshVintageChart(w, p);
+  });
+  wireSeg("vsplit", "vsplit", () => {
+    const [w, p] = whereTuple();
+    refreshVintageChart(w, p);
+  });
+
+  // Vintage heatmap metric
+  wireSeg("yhmetric", "yhmetric", () => {
+    const [w, p] = whereTuple();
+    refreshVintageHeatmap(w, p);
+  });
+
+  // Cohort table density toggle
+  wireSeg("density", "density", (val) => {
+    const t = document.getElementById("cohort-table");
+    if (t) t.classList.toggle("compact", val === "compact");
+    try { localStorage.setItem("dash.density", val); } catch (_) {}
+  });
+
+  // Theme toggle (light <-> dark)
+  const themeBtn = document.getElementById("theme-toggle");
+  if (themeBtn) {
+    themeBtn.addEventListener("click", () => {
+      const next = (document.documentElement.dataset.theme === "light") ? "dark" : "light";
+      document.documentElement.dataset.theme = next;
+      state.theme = next;
+      try { localStorage.setItem("dash.theme", next); } catch (_) {}
+      // Re-paint charts so they pick up new bg/foreground colors
+      const [w, p] = whereTuple();
+      paintYearStrip();
+      refresh().catch((e) => console.error(e));
+    });
+  }
+
+  // Compare mode toggle (vintage strip)
+  const cmpBtn = document.getElementById("vintage-compare-toggle");
+  if (cmpBtn) {
+    cmpBtn.addEventListener("click", () => {
+      state.compareMode = !state.compareMode;
+      cmpBtn.textContent = `Compare mode: ${state.compareMode ? "on" : "off"}`;
+      cmpBtn.classList.toggle("active", state.compareMode);
+      if (!state.compareMode) state.pinnedYears = [];
+      paintYearStrip();
+      const [w, p] = whereTuple();
+      refreshVintageChart(w, p);
+    });
+  }
+
+  // Modal apply (filter dashboard to cohorts shown in modal table)
+  const modalApply = document.getElementById("modal-apply");
+  if (modalApply && !modalApply._bound) {
+    modalApply._bound = true;
+    modalApply.addEventListener("click", () => {
+      // Default behavior: just close — openCellDrill/openCohortDrill set onclick handlers per-context
+      closeModal();
+    });
+  }
 }
 
 // ---------------------------------------------------------------
@@ -1081,6 +1900,20 @@ function openModal() {
 function closeModal() {
   document.getElementById("modal").hidden = true;
   document.body.style.overflow = "";
+  // Reset modal pieces that openCohortDrill / openVintageCellDrill may have toggled
+  const mt = document.getElementById("modal-table");
+  if (mt) mt.style.display = "";
+  const ms = document.getElementById("modal-spark");
+  if (ms) ms.hidden = true;
+  const mf = document.getElementById("modal-ftr");
+  if (mf) mf.hidden = true;
+  const ma = document.getElementById("modal-apply");
+  if (ma) ma.textContent = "Filter dashboard to these cohorts";
+  // Dispose any modal sparkline so the next open is clean
+  if (state.modalSpark) {
+    try { state.modalSpark.dispose(); } catch (_) {}
+    state.modalSpark = null;
+  }
 }
 function bindModal() {
   document.querySelectorAll("#modal [data-close]").forEach((el) => {
@@ -1096,7 +1929,15 @@ function bindTableClick() {
   tbody.addEventListener("click", (e) => {
     const tr = e.target.closest("tr");
     if (!tr) return;
-    focusCohort(tr.dataset.media, tr.dataset.campaign, tr.dataset.date);
+    // If the user shift-clicks, fall back to the legacy "focus filter" behavior.
+    // Plain click opens the per-cohort drill modal with sparkline.
+    if (e.shiftKey) {
+      focusCohort(tr.dataset.media, tr.dataset.campaign, tr.dataset.date);
+    } else if (typeof openCohortDrill === "function") {
+      openCohortDrill(tr.dataset.media, tr.dataset.campaign, tr.dataset.date);
+    } else {
+      focusCohort(tr.dataset.media, tr.dataset.campaign, tr.dataset.date);
+    }
   });
 }
 
@@ -1302,6 +2143,18 @@ function setStatus(s) {
 (async () => {
   try {
     readUrlState();
+    // Restore theme + density preferences early so first paint is correct
+    try {
+      const savedTheme = localStorage.getItem("dash.theme");
+      if (savedTheme === "light" || savedTheme === "dark") {
+        document.documentElement.dataset.theme = savedTheme;
+        state.theme = savedTheme;
+      }
+      const savedDensity = localStorage.getItem("dash.density");
+      if (savedDensity === "compact" || savedDensity === "comfortable") {
+        state.density = savedDensity;
+      }
+    } catch (_) {}
     await initDuckDB();
     setStatus("Building filters");
     // Reveal app BEFORE rendering charts so ECharts can measure the canvas
@@ -1309,6 +2162,14 @@ function setStatus(s) {
     document.getElementById("loader").style.display = "none";
     await loadMeta();
     applyUrlStateToInputs();
+    // Apply restored density to table and reflect in seg buttons
+    const cohortTbl = document.getElementById("cohort-table");
+    if (cohortTbl) cohortTbl.classList.toggle("compact", state.density === "compact");
+    document.querySelectorAll(".seg-btn[data-density]").forEach((b) => {
+      const on = b.dataset.density === state.density;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", String(on));
+    });
     bindUI();
     setStatus("Rendering charts");
     await refresh();
